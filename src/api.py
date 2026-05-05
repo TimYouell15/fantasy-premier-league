@@ -9,6 +9,8 @@
 import pandas as pd
 import requests
 from typing import Dict, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 BASE_URL = "https://fantasy.premierleague.com/api/"
 
@@ -142,33 +144,76 @@ def get_player_id_dict(web_name: bool = True) -> Dict[int, str]:
         )
         return dict(zip(ele_df["id"], ele_df["full_name"]))
 
-
-def collate_player_hist() -> pd.DataFrame:
+def _fetch_player_history(player_id: int, player_name: str, retries: int = 5) -> pd.DataFrame:
     """
-    Fetch and combine historical gameweek data for all players.
+    Fetch one player's gameweek history with retry/backoff.
 
     Args:
-        - None
+        player_id (int): FPL player ID
+        player_name (str): Player's name (for logging)
+        retries (int): Number of retry attempts before giving up
 
     Returns:
-        pd.DataFrame: DataFrame containing concatenated player history across all players
+        pd.DataFrame: DataFrame containing the player's historical gameweek data
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"Fetching history for {player_name}")
+            player_data = get_player_data(player_id)
+
+            player_df = pd.DataFrame(player_data["history"])
+            player_df["player_id"] = player_id
+            player_df["player_name"] = player_name
+
+            return player_df
+
+        except Exception as e:
+            wait = min(2 ** attempt, 30)
+            print(
+                f"Failed fetching {player_name} "
+                f"(attempt {attempt}/{retries}): {e}. Retrying in {wait}s..."
+            )
+            time.sleep(wait)
+
+    print(f"Skipping {player_name} after {retries} failed attempts.")
+    return pd.DataFrame()
+
+
+def collate_player_hist(max_workers: int = 20) -> pd.DataFrame:
+    """
+    Fetch and combine historical gameweek data for all players concurrently.
+
+    Args:
+        max_workers: Number of concurrent requests. Keep this modest to avoid
+                     hammering the FPL API.
+
+    Returns:
+        pd.DataFrame: Combined player history.
     """
     player_dict = get_player_id_dict()
     player_dfs = []
 
-    for player_id, player_name in player_dict.items():
-        print(f"Fetching history for {player_name}")
-        success = False
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_fetch_player_history, player_id, player_name): (
+                player_id,
+                player_name,
+            )
+            for player_id, player_name in player_dict.items()
+        }
 
-        while not success:
+        for future in as_completed(futures):
+            _, player_name = futures[future]
+
             try:
-                player_data = get_player_data(player_id)
-                player_df = pd.DataFrame(player_data["history"])
-                player_df["player_id"] = player_id
-                player_dfs.append(player_df)
-                success = True
-            except Exception:
-                print(f"Retrying {player_name}...")
+                df = future.result()
+                if not df.empty:
+                    player_dfs.append(df)
+            except Exception as e:
+                print(f"Unexpected error for {player_name}: {e}")
+
+    if not player_dfs:
+        return pd.DataFrame()
 
     return pd.concat(player_dfs, ignore_index=True)
 
