@@ -1,9 +1,10 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-FPL API utility functions for fetching and transforming Fantasy Premier League data.
-"""
+######################################################################################
+#
+# FPL API utility functions for fetching and transforming Fantasy Premier League data.
+#
+# Fantasy Premier League
+#
+######################################################################################
 
 import pandas as pd
 import requests
@@ -17,10 +18,10 @@ def _get(endpoint: str) -> dict:
     Internal helper function to make GET requests to the FPL API.
 
     Args:
-        - endpoint: API endpoint string (appended to BASE_URL)
+        endpoint (str): API endpoint string (appended to BASE_URL)
 
     Returns:
-        - JSON response as a dictionary
+        dict: endpoint JSON response
     """
     resp = requests.get(f"{BASE_URL}{endpoint}")
     if resp.status_code != 200:
@@ -32,11 +33,8 @@ def get_bootstrap_data() -> dict:
     """
     Fetch general FPL data including players, teams, and game settings.
 
-    Args:
-        - None
-
     Returns:
-        - Dictionary containing bootstrap data with keys such as:
+        dict: containing bootstrap data with keys such as:
           'elements', 'teams', 'events', 'element_types', etc.
     """
     return _get("bootstrap-static/")
@@ -46,11 +44,8 @@ def get_fixture_data() -> list:
     """
     Fetch all fixture data for the current FPL season.
 
-    Args:
-        - None
-
     Returns:
-        - List of fixture dictionaries
+        list: List of fixture dictionaries
     """
     return _get("fixtures/")
 
@@ -60,10 +55,10 @@ def get_player_data(player_id: int) -> dict:
     Fetch detailed historical and fixture data for a specific player.
 
     Args:
-        - player_id: Unique FPL player ID
+        player_id (int): Unique FPL player ID
 
     Returns:
-        - Dictionary containing:
+        dict: Dictionary containing:
           'history', 'fixtures', and 'history_past'
     """
     return _get(f"element-summary/{player_id}/")
@@ -74,10 +69,10 @@ def get_manager_details(manager_id: int) -> dict:
     Fetch general information about a specific FPL manager.
 
     Args:
-        - manager_id: FPL manager ID
+        manager_id (int): FPL manager ID
 
     Returns:
-        - Dictionary containing manager profile details
+        dict: Dictionary containing manager profile details
     """
     return _get(f"entry/{manager_id}/")
 
@@ -87,10 +82,10 @@ def get_manager_history_data(manager_id: int) -> dict:
     Fetch historical performance data for a specific FPL manager.
 
     Args:
-        - manager_id: FPL manager ID
+        manager_id (int): FPL manager ID
 
     Returns:
-        - Dictionary containing season and gameweek history
+        dict: Dictionary containing season and gameweek history
     """
     return _get(f"entry/{manager_id}/history/")
 
@@ -100,11 +95,11 @@ def get_manager_team_data(manager_id: int, gw: int) -> dict:
     Fetch a manager's team selection for a given gameweek.
 
     Args:
-        - manager_id: FPL manager ID
-        - gw: Gameweek number
+        manager_id (int): FPL manager ID
+        gw (int): Gameweek number
 
     Returns:
-        - Dictionary containing picks, chips, and entry history
+        dict: Dictionary containing picks, chips, and entry history
     """
     return _get(f"entry/{manager_id}/event/{gw}/picks/")
 
@@ -113,11 +108,8 @@ def get_total_fpl_players() -> int:
     """
     Fetch the total number of registered FPL players.
 
-    Args:
-        - None
-
     Returns:
-        - Integer representing total number of players
+        int: Integer representing total number of players
     """
     return get_bootstrap_data()["total_players"]
 
@@ -127,10 +119,10 @@ def get_player_id_dict(web_name: bool = True) -> Dict[int, str]:
     Create a mapping of player IDs to player names.
 
     Args:
-        - web_name: If True, use short web name; otherwise use full name with team
+        web_name (bool): If True, use short web name; otherwise use full name with team
 
     Returns:
-        - Dictionary mapping player_id to player name
+        Dict[int, str]: Dictionary mapping player_id to player name
     """
     data = get_bootstrap_data()
     ele_df = pd.DataFrame(data["elements"])
@@ -159,7 +151,7 @@ def collate_player_hist() -> pd.DataFrame:
         - None
 
     Returns:
-        - DataFrame containing concatenated player history across all players
+        pd.DataFrame: DataFrame containing concatenated player history across all players
     """
     player_dict = get_player_id_dict()
     player_dfs = []
@@ -185,11 +177,8 @@ def get_league_table() -> pd.DataFrame:
     """
     Generate a league table based on completed fixtures.
 
-    Args:
-        - None
-
     Returns:
-        - DataFrame containing team standings and statistics
+        pd.DataFrame: DataFrame containing team standings and statistics
     """
     fixt_df = pd.DataFrame(get_fixture_data())
     data = get_bootstrap_data()
@@ -253,11 +242,8 @@ def get_current_gw() -> int:
     """
     Get the upcoming (next) gameweek number.
 
-    Args:
-        - None
-
     Returns:
-        - Integer representing the next gameweek ID
+        int: The next gameweek ID
     """
     events_df = pd.DataFrame(get_bootstrap_data()["events"])
     return int(events_df.loc[events_df["is_next"] == True, "id"].iloc[0])
@@ -267,11 +253,8 @@ def get_next_deadline() -> pd.Timestamp:
     """
     Get the deadline timestamp for the next gameweek.
 
-    Args:
-        - None
-
     Returns:
-        - Pandas Timestamp of the next gameweek deadline (UTC)
+        pd.Timestamp: Pandas Timestamp of the next gameweek deadline (UTC)
     """
     events_df = pd.DataFrame(get_bootstrap_data()["events"])
     deadline = events_df.loc[events_df["is_next"] == True, "deadline_time"].iloc[0]
@@ -282,11 +265,8 @@ def get_fixture_dfs() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Generate fixture and fixture difficulty rating (FDR) tables for all teams.
 
-    Args:
-        - None
-
     Returns:
-        - Tuple of:
+        Tuple[pd.DataFrame, pd.DataFrame]: Tuple of:
             1. FDR DataFrame (teams vs upcoming difficulty)
             2. Fixture DataFrame (teams vs upcoming opponents)
     """

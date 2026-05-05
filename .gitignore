@@ -8,9 +8,6 @@ __pycache__/
 # OS junk
 .DS_Store
 
-# Environment variables / secrets
+outputs/*
+!outputs/.gitkeep
 .env
-
-# Data (usually)
-data/raw/
-data/processed/
