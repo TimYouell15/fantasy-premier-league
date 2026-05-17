@@ -1,146 +1,280 @@
 import pandas as pd
+import numpy as np
+
 from api import (
     get_bootstrap_data,
     get_fixture_data,
     collate_player_hist,
-    get_current_gw
+    get_current_gw,
 )
 
-ROLLING_WINDOWS = [3, 5]
-
-def build_training_data() -> pd.DataFrame:
-    hist = collate_player_hist()
-
-    hist = hist.sort_values(["player_id", "round"]).copy()
-    hist["target"] = hist["total_points"]
-
-    base_cols = [
-        "player_id",
-        "round",
-        "minutes",
-        "goals_scored",
-        "assists",
-        "clean_sheets",
-        "goals_conceded",
-        "own_goals",
-        "penalties_saved",
-        "penalties_missed",
-        "yellow_cards",
-        "red_cards",
-        "saves",
-        "bonus",
-        "bps",
-        "influence",
-        "creativity",
-        "threat",
-        "ict_index",
-        "value",
-        "was_home",
-        "team_h_score",
-        "team_a_score",
-        "target",
-    ]
-
-    hist = hist[[c for c in base_cols if c in hist.columns]].copy()
-
-    numeric_cols = [
-        c for c in hist.columns
-        if c not in ["player_id", "round", "target", "was_home"]
-    ]
-
-    for col in numeric_cols:
-        hist[col] = pd.to_numeric(hist[col], errors="coerce").fillna(0)
-
-    hist["was_home"] = hist["was_home"].astype(int)
-
-    for window in ROLLING_WINDOWS:
-        for col in ["minutes", "target", "bps", "ict_index", "threat", "creativity", "influence"]:
-            if col in hist.columns:
-                hist[f"{col}_roll_{window}"] = (
-                    hist.groupby("player_id")[col]
-                    .shift(1)
-                    .rolling(window)
-                    .mean()
-                    .reset_index(level=0, drop=True)
-                )
-
-    hist = hist.fillna(0)
-    return hist
+from model_config import RENAMED_COLS, BASE_FEATURES
 
 
-def build_prediction_data() -> pd.DataFrame:
+TEAM_STRENGTH_COLS = [
+    "id", "name", "strength", "strength_overall_home",
+    "strength_overall_away", "strength_attack_home",
+    "strength_attack_away", "strength_defence_home",
+    "strength_defence_away",
+]
+
+TEAM_COLS = [
+    "id", "team", "team_str", "team_str_h", "team_str_a",
+    "team_str_att_h", "team_str_att_a", "team_str_def_h", "team_str_def_a",
+]
+
+OPPO_COLS = [
+    "opponent_team", "oppo_name", "oppo_str", "oppo_str_h",
+    "oppo_str_a", "oppo_str_att_h", "oppo_str_att_a",
+    "oppo_str_def_h", "oppo_str_def_a",
+]
+
+STRING_COLS = ["position", "team", "oppo_name", "was_home"]
+
+RAW_STAT_COLS = [
+    "points", "assists", "goals", "cs", "xA", "xGI", "xG",
+    "bps", "xGC", "i", "c", "t", "ict", "saves", "ps", "yc",
+    "rc", "mins",
+]
+
+EVENT_STAT_COLS = RAW_STAT_COLS + ["gc", "og", "pm", "prop_mins"]
+
+TEAM_STAT_COLS = ["goals", "xG", "xA"]
+
+
+def _position_map():
+    data = get_bootstrap_data()
+    return pd.DataFrame(data["element_types"]).set_index("id")["singular_name_short"].to_dict()
+
+
+def _prepare_reference_tables():
+    data = get_bootstrap_data()
+    teams = pd.DataFrame(data["teams"])
+    fixtures = pd.DataFrame(get_fixture_data()).rename(columns={"id": "fixture"})
+
+    team_cut = teams[TEAM_STRENGTH_COLS].copy()
+    oppo_cut = teams[TEAM_STRENGTH_COLS].copy()
+
+    team_cut.columns = TEAM_COLS
+    oppo_cut.columns = OPPO_COLS
+
+    fixt_cut = fixtures[
+        ["fixture", "event", "team_h", "team_a", "team_h_difficulty", "team_a_difficulty"]
+    ].copy()
+
+    return teams, fixtures, team_cut, oppo_cut, fixt_cut
+
+
+def _add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    for col in EVENT_STAT_COLS:
+        if col not in df.columns:
+            df[col] = 0
+
+    for col in RAW_STAT_COLS:
+        if col not in df.columns:
+            df[col] = 0
+
+    for col in EVENT_STAT_COLS + RAW_STAT_COLS:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    df["games_avail"] = df.groupby("p_id").cumcount() + 1
+    df["prop_mins"] = (
+        df.groupby("p_id")["mins"].transform(lambda x: x.cumsum())
+        / (df["games_avail"] * 90)
+    )
+
+    for col in TEAM_STAT_COLS:
+        df[f"team_{col}"] = df.groupby(["team", "fixture"])[col].transform("sum")
+
+    ave_cols = RAW_STAT_COLS + [f"team_{c}" for c in TEAM_STAT_COLS]
+
+    for col in ave_cols:
+        df[f"ave_{col}"] = (
+            df.groupby("p_id")[col].cumsum() / df["games_avail"]
+        )
+
+    fpf_source_cols = (
+        EVENT_STAT_COLS
+        + [f"ave_{c}" for c in RAW_STAT_COLS]
+        + [f"ave_team_{c}" for c in TEAM_STAT_COLS]
+    )
+
+    rename_map = {c: f"{c}_fpf" for c in fpf_source_cols}
+    df = df.rename(columns=rename_map)
+
+    fpf_cols = list(rename_map.values())
+
+    df["points"] = df["points_fpf"]
+    df[fpf_cols] = df.groupby("p_id")[fpf_cols].shift(1)
+
+    df = df[df["points_fpf"].notna()].copy()
+    df = df[df["points"].notna()].copy()
+
+    return df
+
+
+def build_training_data() -> tuple[pd.DataFrame, list[str]]:
     bootstrap = get_bootstrap_data()
-    players = pd.DataFrame(bootstrap["elements"])
-    teams = pd.DataFrame(bootstrap["teams"])
-    fixtures = pd.DataFrame(get_fixture_data())
+    elements = pd.DataFrame(bootstrap["elements"])
 
-    next_gw = get_current_gw()
+    teams, fixtures, team_cut, oppo_cut, fixt_cut = _prepare_reference_tables()
+    pos_map = _position_map()
 
-    upcoming = fixtures[
-        (fixtures["event"] == next_gw) & (fixtures["finished"] == False)
+    hist = collate_player_hist()
+    hist = hist.rename(columns=RENAMED_COLS)
+
+    elements_cut = elements.copy()
+    elements_cut = elements_cut.rename(columns={"id": "element"})
+    elements_cut["name"] = elements_cut["first_name"] + " " + elements_cut["second_name"]
+    elements_cut["position"] = elements_cut["element_type"].map(pos_map)
+    elements_cut = elements_cut[["element", "name", "position", "team"]]
+
+    df = hist.merge(elements_cut, on="element", how="left")
+    df["fixture"] = df["fixture"].astype(int)
+    df["GW"] = df["round"]
+    df["p_id"] = df["element"].astype(str)
+
+    df = df.rename(columns={"team": "id"})
+    df = df.merge(team_cut, on="id", how="left")
+    df = df.merge(oppo_cut, on="opponent_team", how="left")
+    df = df.merge(
+        fixt_cut[["fixture", "team_h_difficulty", "team_a_difficulty"]],
+        on="fixture",
+        how="left",
+    )
+
+    df["team"] = df["team"].fillna(df["id"])
+
+    df = df.sort_values(["p_id", "fixture"])
+    df = _add_lag_features(df)
+
+    df.loc[df["was_home"] == True, "oppo_difficulty"] = df["team_h_difficulty"]
+    df.loc[df["was_home"] == False, "oppo_difficulty"] = df["team_a_difficulty"]
+
+    df["position"] = df["position"].replace({"GK": "GKP"})
+
+    dummy = pd.get_dummies(df, columns=STRING_COLS)
+
+    feature_cols = list(BASE_FEATURES)
+
+    dynamic_cols = [
+        c for c in dummy.columns
+        if c.startswith("team_")
+        or c.startswith("oppo_name_")
+    ]
+
+    for c in dynamic_cols:
+        if c not in feature_cols:
+            feature_cols.append(c)
+
+    for c in feature_cols:
+        if c not in dummy.columns:
+            dummy[c] = 0
+
+    dummy[feature_cols] = dummy[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+
+    return dummy, feature_cols
+
+
+def build_future_data(feature_cols: list[str]) -> pd.DataFrame:
+    bootstrap = get_bootstrap_data()
+    elements = pd.DataFrame(bootstrap["elements"])
+    teams, fixtures, team_cut, oppo_cut, fixt_cut = _prepare_reference_tables()
+    pos_map = _position_map()
+
+    current_gw = get_current_gw()
+
+    hist = collate_player_hist()
+    hist = hist.rename(columns=RENAMED_COLS)
+
+    elements_hist = elements.copy()
+    elements_hist = elements_hist.rename(columns={"id": "element"})
+    elements_hist["name"] = elements_hist["first_name"] + " " + elements_hist["second_name"]
+    elements_hist["position"] = elements_hist["element_type"].map(pos_map)
+    elements_hist = elements_hist[["element", "name", "position", "team"]]
+
+    curr = hist.merge(elements_hist, on="element", how="left")
+    curr["fixture"] = curr["fixture"].astype(int)
+    curr["p_id"] = curr["element"].astype(str)
+    curr = curr.rename(columns={"team": "id"})
+    curr = curr.merge(team_cut, on="id", how="left")
+    curr = curr.merge(oppo_cut, on="opponent_team", how="left")
+    curr = curr.merge(
+        fixt_cut[["fixture", "team_h_difficulty", "team_a_difficulty"]],
+        on="fixture",
+        how="left",
+    )
+    curr["team"] = curr["team"].fillna(curr["id"])
+    curr = curr.sort_values(["p_id", "fixture"])
+
+    curr = _add_lag_features(curr)
+
+    fpf_cols = [c for c in curr.columns if c.endswith("_fpf")]
+    latest_player_features = (
+        curr.sort_values("fixture")
+        .groupby("element")
+        .tail(1)[["element"] + fpf_cols]
+    )
+
+    future_fixtures = fixtures[
+        (fixtures["event"] >= current_gw) & (fixtures["finished"] == False)
     ].copy()
 
     rows = []
 
-    for _, p in players.iterrows():
+    for _, p in elements.iterrows():
         team_id = p["team"]
-        team_fixtures = upcoming[
-            (upcoming["team_h"] == team_id) | (upcoming["team_a"] == team_id)
+
+        player_fixtures = future_fixtures[
+            (future_fixtures["team_h"] == team_id)
+            | (future_fixtures["team_a"] == team_id)
         ]
 
-        if team_fixtures.empty:
-            continue
-
-        for _, f in team_fixtures.iterrows():
+        for _, f in player_fixtures.iterrows():
             was_home = f["team_h"] == team_id
+            opponent = f["team_a"] if was_home else f["team_h"]
+            oppo_difficulty = (
+                f["team_h_difficulty"] if was_home else f["team_a_difficulty"]
+            )
+
             rows.append({
-                "player_id": p["id"],
-                "web_name": p["web_name"],
-                "team": teams.set_index("id").loc[team_id, "short_name"],
-                "position": p["element_type"],
-                "now_cost": p["now_cost"] / 10,
-                "selected_by_percent": float(p["selected_by_percent"]),
-                "form": float(p["form"] or 0),
-                "chance_of_playing_next_round": p["chance_of_playing_next_round"] or 100,
-                "minutes": p["minutes"],
-                "goals_scored": p["goals_scored"],
-                "assists": p["assists"],
-                "clean_sheets": p["clean_sheets"],
-                "goals_conceded": p["goals_conceded"],
-                "own_goals": p["own_goals"],
-                "penalties_saved": p["penalties_saved"],
-                "penalties_missed": p["penalties_missed"],
-                "yellow_cards": p["yellow_cards"],
-                "red_cards": p["red_cards"],
-                "saves": p["saves"],
-                "bonus": p["bonus"],
-                "bps": p["bps"],
-                "influence": float(p["influence"] or 0),
-                "creativity": float(p["creativity"] or 0),
-                "threat": float(p["threat"] or 0),
-                "ict_index": float(p["ict_index"] or 0),
+                "element": p["id"],
+                "name": f"{p['first_name']} {p['second_name']}",
+                "position": pos_map.get(p["element_type"]),
+                "id": team_id,
+                "fixture": f["fixture"],
+                "GW": f["event"],
                 "value": p["now_cost"],
-                "was_home": int(was_home),
-                "fixture_difficulty": (
-                    f["team_h_difficulty"] if was_home else f["team_a_difficulty"]
-                ),
-                "gameweek": next_gw,
+                "transfers_in": p["transfers_in_event"],
+                "transfers_out": p["transfers_out_event"],
+                "transfers_balance": p["transfers_in_event"] - p["transfers_out_event"],
+                "was_home": was_home,
+                "opponent_team": opponent,
+                "oppo_difficulty": oppo_difficulty,
             })
 
-    pred = pd.DataFrame(rows)
+    fut = pd.DataFrame(rows)
 
-    train = build_training_data()
-    latest = (
-        train.sort_values(["player_id", "round"])
-        .groupby("player_id")
-        .tail(1)
+    fut = fut.merge(team_cut, on="id", how="left")
+    fut = fut.merge(oppo_cut, on="opponent_team", how="left")
+    fut = fut.merge(latest_player_features, on="element", how="left")
+
+    fut["position"] = fut["position"].replace({"GK": "GKP"})
+
+    fut_dummy = pd.get_dummies(fut, columns=STRING_COLS)
+
+    for c in feature_cols:
+        if c not in fut_dummy.columns:
+            fut_dummy[c] = 0
+
+    fut_dummy[feature_cols] = (
+        fut_dummy[feature_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0)
     )
 
-    rolling_cols = [c for c in latest.columns if "_roll_" in c]
-    pred = pred.merge(
-        latest[["player_id"] + rolling_cols],
-        on="player_id",
-        how="left",
-    )
+    fut_dummy = fut_dummy[fut_dummy["points_fpf"].notna()].copy()
 
-    return pred.fillna(0)
+    return fut_dummy

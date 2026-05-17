@@ -1,0 +1,56 @@
+name: FPL ML Pipeline
+
+on:
+  schedule:
+    # Runs every 6 hours
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  train-predict-email:
+    runs-on: ubuntu-latest
+
+    env:
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Restore outputs cache
+        uses: actions/cache@v4
+        with:
+          path: outputs
+          key: fpl-outputs-${{ github.run_id }}
+          restore-keys: |
+            fpl-outputs-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Train model
+        run: PYTHONPATH=. python src/train.py
+
+      - name: Predict upcoming gameweek
+        run: PYTHONPATH=. python src/predict.py
+
+      - name: Send email if deadline is within 36 hours
+        run: PYTHONPATH=. python src/emailer.py
+
+      - name: Commit email state and predictions
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add outputs/
+          git commit -m "Update FPL predictions and email state" || echo "No changes to commit"
+          git push
